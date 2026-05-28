@@ -38,6 +38,7 @@
 library(tidyverse)
 library(fs)
 library(pdftools)
+library(readxl)
 
 # ── CONFIGURATION ─────────────────────────────────────────────────────────────
 root_dir   <- "N:/work/RiskWise/Brendan_Ag_Conf_papers/testing_workflow"
@@ -142,7 +143,9 @@ index <- tibble(path_original = pdf_files) |>
       str_remove("\\.pdf$") |>          # drop .pdf
       str_remove("^\\d{4}_") |>         # drop YYYY_
       str_extract("^[^_]+") |>          # take everything up to the next _
-      str_squish()
+      str_squish() |>
+      str_remove(" and .*$")            # keep only first author, drop " and ..."
+    
   ) |>
   arrange(year, filename_original) |>
   group_by(year) |>
@@ -167,17 +170,6 @@ if (nrow(failed) > 0) {
   cat("\nAll titles extracted successfully.\n")
 }
 
-# # Give failed files a placeholder so the CSV is not left with bare NAs
-# index <- index |>
-#   mutate(
-#     title = if_else(
-#       is.na(title),
-#       paste("TITLE NEEDED —", filename_original |>
-#               str_remove("\\.pdf$") |>
-#               str_remove("^\\d{4}_")),
-#       title
-#     )
-#   )
 
 # ── 5. MANUAL TITLE FIXES ─────────────────────────────────────────────────────
 # For any file listed in section 4, open the PDF and paste the correct
@@ -185,39 +177,59 @@ if (nrow(failed) > 0) {
 # Leave this block empty if section 4 reported no failures.
 # JACKIE - this could be replaced with a file that looks up the replacements
 
-manual_fixes_title <- tribble(
-  ~id,          ~title,
-  "1996_0001",  "FIELD APPLICATION OF VULPIA PHYTOTOXICITY MANAGEMENT: A CASE STUDY",
-  "1996_0002",  "FIELD APPLICATION OF VULPIA PHYTOTOXICITY MANAGEMENT: A CASE STUDY",
+# ── 5. MANUAL FIXES FROM EXCEL ────────────────────────────────────────────────
+# Reads metadata_manual fix.xlsx from the root folder.
+# Columns expected: ID, first_author_new, title_actual
+# "no change" (any case) in a cell means that field is left as-is.
+# Either fix column can be blank/NA — only the populated fields are applied.
+
+fixes_path <- file.path(root_dir, "metadata_manual fix.xlsx")
+
+if (file.exists(fixes_path)) {
   
-  "1996_0003",  "A CASE STUDY IN DECISION SUPPORT INFORMATION: A MANUAL TITLED MAKING BETTER DECISIONS FOR YOUR PROPERTY",
-  "1996_0004",  "A CASE STUDY IN DECISION SUPPORT INFORMATION: A MANUAL TITLED MAKING BETTER DECISIONS FOR YOUR PROPERTY",
+  manual_fixes_raw <- readxl::read_excel(fixes_path) |>
+    rename(
+      id            = ID,
+      first_author  = first_author_new,
+      title         = title_actual
+    ) |>
+    # Treat "no change" (case-insensitive) and blank/NA as "do not update"
+    mutate(
+      first_author = if_else(
+        is.na(first_author) | str_to_lower(str_squish(first_author)) == "no change",
+        NA_character_, str_squish(first_author)
+      ),
+      title = if_else(
+        is.na(title) | str_to_lower(str_squish(title)) == "no change",
+        NA_character_, str_squish(title)
+      )
+    ) |>
+    # Drop rows where both fixes are NA (nothing to do)
+    filter(!is.na(first_author) | !is.na(title))
   
-  "2024_0001",  "Subsoil amelioration on clay soils in south-eastern Australia: where will it succeed."
-)
-
-manual_fixes_author <- tribble(
-  ~id,          ~first_author,
-  "1996_0001",  "M. An",
-  "1996_0002",  "M. An",
+  # Apply author fixes
+  author_fixes <- manual_fixes_raw |>
+    filter(!is.na(first_author)) |>
+    select(id, first_author)
   
-  "1996_0003",  "P. Harris",
-  "1996_0004",  "P. Harris",
+  if (nrow(author_fixes) > 0) {
+    index <- index |> rows_update(author_fixes, by = "id")
+    cat("✓ Applied", nrow(author_fixes), "author fix(es) from Excel\n")
+  }
   
-  "2019_0001",  "A.F. Colaco",
-  "2024_0001",  "Armstrong R",
-  "2024_0002",  "RW Bell"
-)
-
-# Combine them
-manual_fixes <- full_join(manual_fixes_title, manual_fixes_author, by = "id")
-
-
-
-if (nrow(manual_fixes) > 0) {
-  index <- index |> rows_update(manual_fixes, by = "id")
+  # Apply title fixes
+  title_fixes <- manual_fixes_raw |>
+    filter(!is.na(title)) |>
+    select(id, title)
+  
+  if (nrow(title_fixes) > 0) {
+    index <- index |> rows_update(title_fixes, by = "id")
+    cat("✓ Applied", nrow(title_fixes), "title fix(es) from Excel\n")
+  }
+  
+} else {
+  cat("No manual fixes file found at:", fixes_path, "\n")
 }
-
 # ── 6. COPY FILES AND SAVE INDEX ──────────────────────────────────────────────
 if (do_copy) {
   dir_create(output_dir)
