@@ -9,8 +9,8 @@
 #      excluding the papers_flat output folder.
 #   2. Opens each PDF and extracts:
 #        - Title:       first meaningful line(s) of page 1. Where the first
-#                       line ends with a colon, the next line is appended as
-#                       the title continues across two lines.
+#                       line ends with a continuation character (:, -, ;),
+#                       the next line is appended as the title continues.
 #        - Page count:  total number of pages.
 #        - Word count:  total word count across all pages.
 #   3. Parses first author from the filename by taking the text between the
@@ -22,7 +22,8 @@
 #   6. Saves the completed index as paper_index.csv in the root folder.
 #
 # Known limitations:
-#   - Title extraction depends on the PDF having a text layer.
+#   - Title extraction depends on the PDF having a text layer. Scanned PDFs
+#     with no text layer will return NA and flag for manual fixing.
 #   - Only the first author is captured, parsed from the filename.
 #   - A small number of filenames do not follow the YYYY_Author_... convention
 #     (e.g. where the filename starts with a title fragment like A CASE STUDY).
@@ -32,7 +33,7 @@
 # Outputs:  Flat folder of renamed PDFs    (output_dir)
 #           CSV index of metadata          (index_out)
 #
-# Packages: tidyverse, fs, pdftools
+# Packages: tidyverse, fs, pdftools, readxl
 # ══════════════════════════════════════════════════════════════════════════════
 
 library(tidyverse)
@@ -41,8 +42,8 @@ library(pdftools)
 library(readxl)
 
 # ── CONFIGURATION ─────────────────────────────────────────────────────────────
-root_dir   <- "N:/work/RiskWise/Brendan_Ag_Conf_papers/"
-output_dir <- "N:/work/RiskWise/Brendan_Ag_Conf_papers/papers_flat"
+root_dir   <- "N:/work/RiskWise/Brendan_Ag_Conf_papers/Full_data_set/"
+output_dir <- "N:/work/RiskWise/Brendan_Ag_Conf_papers/Full_data_set/papers_flat"
 index_out  <- file.path(root_dir, "paper_index.csv")
 do_copy    <- TRUE
 # ──────────────────────────────────────────────────────────────────────────────
@@ -55,17 +56,45 @@ pdf_files <- dir_ls(root_dir, recurse = TRUE, glob = "*.pdf") |>
 cat("Found", length(pdf_files), "PDFs\n")
 
 # ── 2. EXTRACT METADATA FROM EACH PDF ─────────────────────────────────────────
-# Title extraction:
-#   - Split page 1 into lines, remove blanks and bare numbers
-#   - Take the first meaningful line as the title
-#   - If that line ends with a colon, append the next line because the
-#     title continues e.g.:
-#     "FIELD APPLICATION OF VULPIA PHYTOTOXICITY MANAGEMENT:"
-#     "A CASE STUDY"
-#     becomes: "FIELD APPLICATION OF VULPIA PHYTOTOXICITY MANAGEMENT: A CASE STUDY"
+# Title extraction strategy:
+#   - Split page 1 into lines
+#   - Remove blanks, bare numbers, bare punctuation, and known boilerplate
+#     header words (e.g. "OFFICIAL") that appear above the real title
+#   - Drop lines that are mostly encoding-replacement characters (junk lines
+#     from PDFs with partial text layers)
+#   - Take the first remaining line as the title
+#   - If that line ends with a continuation character (:, -, ;) append the
+#     next line, and again if that line also ends with a continuation character
+#     e.g. "FIELD APPLICATION OF VULPIA PHYTOTOXICITY MANAGEMENT:"
+#          "A CASE STUDY"
+#     becomes "FIELD APPLICATION OF VULPIA PHYTOTOXICITY MANAGEMENT: A CASE STUDY"
 #
-# Note: discard() was found to behave unexpectedly in testing so direct
-# logical indexing is used instead.
+# Encoding:
+#   - iconv uses Unicode replacement character (U+FFFD) instead of "-" so
+#     real hyphens and dashes in titles are preserved
+#   - Replacement characters are stripped from the final title string
+
+# Patterns to filter out before selecting the title line.
+# Each is a regex matched against the lowercased line.
+boilerplate_patterns <- c(
+  "^official$", "^confidential$", "^draft$", "^restricted$", "^protected$",
+  "^summary$", "^abstract$", "^introduction$",
+  "^\\d+$",        # bare page numbers
+  "^[ivxlcdm]+$",  # roman numerals
+  "^https?://",    # URLs
+  "^www\\.",
+  "^\\s*$",        # whitespace only
+  "^\\.$",         # bare full stop  
+  "^,$",           # bare comma
+  "^;$",           # bare semicolon
+  "^-$",           # bare hyphen
+  "^\\?$"          # bare question mark (also catches image-only pages)
+)
+
+is_boilerplate <- function(x) {
+  str_to_lower(x) |>
+    map_lgl(~ any(str_detect(.x, boilerplate_patterns)))
+}
 
 cat("Extracting metadata (this may take a few minutes)...\n")
 
@@ -78,24 +107,38 @@ for (i in seq_along(pdf_files)) {
   result <- tryCatch({
     
     pages      <- pdf_text(pdf_files[i])
-    page1      <- pages[1] |> iconv(from = "UTF-8", to = "UTF-8", sub = "-")
+    # Use Unicode replacement character (not "-") so real dashes in titles
+    # are not corrupted by the encoding substitution
+    page1      <- pages[1] |> iconv(from = "UTF-8", to = "UTF-8", sub = "\uFFFD")
     all_text   <- paste(pages, collapse = " ")
     page_count <- length(pages)
     word_count <- str_count(all_text, "\\S+")
     
-    # Split page 1 into lines, remove blanks and bare numbers
-    lines     <- str_split(page1, "\n")[[1]] |> str_squish()
-    is_empty  <- lines == ""
-    is_number <- str_detect(lines, "^\\d{1,4}$")
-    lines     <- lines[!(is_empty | is_number)]
+    # Split into lines, squish whitespace, then filter
+    lines <- str_split(page1, "\n")[[1]] |>
+      str_squish() |>
+      keep(~ .x != "") |>
+      keep(~ !is_boilerplate(.x)) |>
+      # Drop lines where >30% of characters are replacement chars (junk lines)
+      keep(~ str_count(.x, "\uFFFD") / max(str_length(.x), 1) < 0.3)
     
-    # First remaining line is the title
     title <- if (length(lines) > 0) lines[1] else NA_character_
     
-    # If the title line ends with a colon, the title continues on the next line
-    if (!is.na(title) && str_ends(title, ":") && length(lines) > 1) {
-      title <- paste(title, lines[2])
+    # If the title ends with a continuation character, append the next line.
+    # Handles multi-line titles split by: colon, hyphen/dash, or semicolon.
+    # Checks up to two continuation levels.
+    if (!is.na(title) && length(lines) > 1) {
+      if (str_detect(title, "[:\\-;]$")) {
+        title <- paste(title, lines[2])
+        if (length(lines) > 2 && str_detect(lines[2], "[:\\-;]$")) {
+          title <- paste(title, lines[3])
+        }
+      }
     }
+    
+    # Strip any remaining replacement characters and tidy whitespace
+    title <- str_replace_all(title, "\uFFFD", "") |> str_squish()
+    if (title == "") title <- NA_character_
     
     list(title = title, page_count = page_count, word_count = word_count)
     
@@ -140,11 +183,11 @@ index <- tibble(path_original = pdf_files) |>
     
     # Extract author: text between first and second underscore
     first_author = filename_original |>
-      str_remove("\\.pdf$") |>          # drop .pdf
-      str_remove("^\\d{4}_") |>         # drop YYYY_
-      str_extract("^[^_]+") |>          # take everything up to the next _
+      str_remove("\\.pdf$") |>       # drop .pdf
+      str_remove("^\\d{4}_") |>      # drop YYYY_
+      str_extract("^[^_]+") |>       # take everything up to the next _
       str_squish() |>
-      str_remove(" and .*$")            # keep only first author, drop " and ..."
+      str_remove(" and .*$")         # keep only first author, drop " and ..."
     
   ) |>
   arrange(year, filename_original) |>
@@ -159,8 +202,9 @@ index <- tibble(path_original = pdf_files) |>
          page_count, word_count, first_author, path_original, path_new)
 
 # ── 4. REPORT FAILED TITLE EXTRACTIONS ───────────────────────────────────────
-# Show any files where pdftools could not extract a title.
-# These will need to be fixed manually in section 5.
+# Show any files where title extraction returned NA.
+# These are typically scanned PDFs with no text layer and will need
+# manual fixing in the Excel sheet (section 5).
 failed <- index |> filter(is.na(title))
 
 if (nrow(failed) > 0) {
@@ -169,67 +213,25 @@ if (nrow(failed) > 0) {
 } else {
   cat("\nAll titles extracted successfully.\n")
 }
-
-
-# ── 5. MANUAL TITLE FIXES ─────────────────────────────────────────────────────
-# For any file listed in section 4, open the PDF and paste the correct
-# title below. Remove comment markers and fill in the title string.
-# Leave this block empty if section 4 reported no failures.
-# JACKIE - this could be replaced with a file that looks up the replacements
-
 # ── 5. MANUAL FIXES FROM EXCEL ────────────────────────────────────────────────
 # Reads metadata_manual fix.xlsx from the root folder.
 # Columns expected: ID, first_author_new, title_actual
 # "no change" (any case) in a cell means that field is left as-is.
 # Either fix column can be blank/NA — only the populated fields are applied.
 
-fixes_path <- file.path(root_dir, "metadata_manual fix.xlsx")
+fixes_path       <- file.path(root_dir, "metadata_manual fix.xlsx")
+manual_fixes_raw <- readxl::read_excel(fixes_path)
+manual_fixes_raw <- manual_fixes_raw |>
+  rename(
+    id           = ID,
+    first_author = first_author_new,
+    title        = title_actual
+  ) |>
+  select(id, first_author, title)
 
-if (file.exists(fixes_path)) {
-  
-  manual_fixes_raw <- readxl::read_excel(fixes_path) |>
-    rename(
-      id            = ID,
-      first_author  = first_author_new,
-      title         = title_actual
-    ) |>
-    # Treat "no change" (case-insensitive) and blank/NA as "do not update"
-    mutate(
-      first_author = if_else(
-        is.na(first_author) | str_to_lower(str_squish(first_author)) == "no change",
-        NA_character_, str_squish(first_author)
-      ),
-      title = if_else(
-        is.na(title) | str_to_lower(str_squish(title)) == "no change",
-        NA_character_, str_squish(title)
-      )
-    ) |>
-    # Drop rows where both fixes are NA (nothing to do)
-    filter(!is.na(first_author) | !is.na(title))
-  
-  # Apply author fixes
-  author_fixes <- manual_fixes_raw |>
-    filter(!is.na(first_author)) |>
-    select(id, first_author)
-  
-  if (nrow(author_fixes) > 0) {
-    index <- index |> rows_update(author_fixes, by = "id")
-    cat("✓ Applied", nrow(author_fixes), "author fix(es) from Excel\n")
-  }
-  
-  # Apply title fixes
-  title_fixes <- manual_fixes_raw |>
-    filter(!is.na(title)) |>
-    select(id, title)
-  
-  if (nrow(title_fixes) > 0) {
-    index <- index |> rows_update(title_fixes, by = "id")
-    cat("✓ Applied", nrow(title_fixes), "title fix(es) from Excel\n")
-  }
-  
-} else {
-  cat("No manual fixes file found at:", fixes_path, "\n")
-}
+index <- index |>
+  rows_update(manual_fixes_raw, by = "id", unmatched = "ignore")
+
 # ── 6. COPY FILES AND SAVE INDEX ──────────────────────────────────────────────
 if (do_copy) {
   dir_create(output_dir)
@@ -243,5 +245,3 @@ index |>
   select(id, year, filename_original, title,
          page_count, word_count, first_author, path_original) |>
   write_csv(index_out)
-
-cat("✓ Index saved to:", index_out, "\n")
