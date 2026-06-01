@@ -9,9 +9,8 @@
 #      excluding the papers_flat output folder.
 #   2. Opens each PDF and extracts:
 #        - Title:       first meaningful line(s) of page 1. Line 2 is appended
-#                       if line 1 ends with continuation punctuation (, : - ;)
-#                       OR if line 2 is long enough to be title text (>=40 chars)
-#                       and doesn't look like an address or email.
+#                       if line 1 ends with , : - ; or the words and/AND/&
+#                       AND line 2 doesn't look like an address or email.
 #        - Page count:  total number of pages.
 #        - Word count:  total word count across all pages.
 #   3. Parses first author from the filename by taking the text between the
@@ -65,10 +64,8 @@ cat("Found", length(pdf_files), "PDFs\n")
 #     boilerplate header words (e.g. "OFFICIAL")
 #   - Drop lines that are mostly encoding-replacement characters
 #   - Take the first remaining line as the title
-#   - Append line 2 if:
-#       (a) line 1 ends with continuation punctuation (, : - ;), OR
-#       (b) line 2 is >= 40 characters (long enough to be title text, not
-#           a short author name) AND doesn't look like an address or email
+#   - Append line 2 if line 1 ends with , : - ; or the words and/AND/&
+#     AND line 2 doesn't look like an address or email
 
 # Boilerplate header words/patterns to skip before selecting the title line
 boilerplate_patterns <- c(
@@ -128,19 +125,18 @@ for (i in seq_along(pdf_files)) {
     
     title <- if (length(lines) > 0) lines[1] else NA_character_
     
-    # Append line 2 if it looks like title text continuing, not author/address.
-    # (a) line 1 ends with continuation punctuation: title clearly wraps
-    # (b) line 2 is long (>=40 chars) and not an address/email: likely a
-    #     wrapped title rather than a short author name line
+    # Append line 2 if line 1 ends with continuation punctuation or words,
+    # but only if line 2 doesn't look like an address or email.
+    # Continuation signals: , : - ; or the words and / AND / &
     if (!is.na(title) && length(lines) > 1) {
       
       line2 <- lines[2]
       
       is_continuation_punct <- str_detect(title, "[,:\\-;]$")
-      is_long_enough        <- str_length(line2) >= 40
+      is_continuation_and   <- str_detect(title, "\\band$|\\bAND$|&$")
       is_not_address        <- !str_detect(line2, "@|P\\.O\\.|PMB|GPO|Box\\s\\d|\\d{4}$")
       
-      if (is_continuation_punct || (is_long_enough && is_not_address)) {
+      if ((is_continuation_punct || is_continuation_and) && is_not_address) {
         title <- paste(title, line2)
       }
     }
@@ -246,5 +242,3 @@ index |>
   select(id, year, filename_original, title,
          page_count, word_count, first_author, path_original) |>
   write_csv(index_out)
-
-cat("✓ Index saved to:", index_out, "\n")
