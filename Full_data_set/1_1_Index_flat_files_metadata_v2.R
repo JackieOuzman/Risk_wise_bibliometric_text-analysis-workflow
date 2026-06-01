@@ -8,9 +8,10 @@
 #   1. Scans year-named subfolders (e.g. /1985/, /2004/) for all PDFs,
 #      excluding the papers_flat output folder.
 #   2. Opens each PDF and extracts:
-#        - Title:       first meaningful line(s) of page 1. Multi-line titles
-#                       are handled by continuation punctuation detection and
-#                       by checking whether the next line looks like an author.
+#        - Title:       first meaningful line(s) of page 1. Line 2 is appended
+#                       if line 1 ends with continuation punctuation (, : - ;)
+#                       OR if line 2 is long enough to be title text (>=40 chars)
+#                       and doesn't look like an address or email.
 #        - Page count:  total number of pages.
 #        - Word count:  total word count across all pages.
 #   3. Parses first author from the filename by taking the text between the
@@ -23,6 +24,8 @@
 # Known limitations:
 #   - Title extraction depends on the PDF having a text layer. Scanned PDFs
 #     with no text layer will return NA and flag for manual fixing.
+#   - Titles that wrap across more than 2 lines will be truncated; these can
+#     be corrected manually in the Excel fixes sheet.
 #   - Only the first author is captured, parsed from the filename.
 #   - A small number of filenames do not follow the YYYY_Author_... convention.
 #     These will need manual correction in the CSV after running.
@@ -55,16 +58,17 @@ cat("Found", length(pdf_files), "PDFs\n")
 
 # ── 2. EXTRACT METADATA FROM EACH PDF ─────────────────────────────────────────
 # Title extraction strategy:
-#   - Transliterate common non-ASCII punctuation (curly quotes, em-dash,
-#     trademark etc.) to ASCII equivalents before processing
+#   - Transliterate common non-ASCII punctuation (curly quotes, en/em-dash,
+#     trademark etc.) to ASCII equivalents before processing so these
+#     characters do not corrupt the extracted title
 #   - Split page 1 into lines, remove blanks, bare punctuation, and known
 #     boilerplate header words (e.g. "OFFICIAL")
 #   - Drop lines that are mostly encoding-replacement characters
 #   - Take the first remaining line as the title
-#   - Extend onto the next line if:
-#       (a) line ends with continuation punctuation (:, -, ;), OR
-#       (b) line doesn't end a sentence AND the next line doesn't look like
-#           an author or institution line (catches plain-wrapped titles)
+#   - Append line 2 if:
+#       (a) line 1 ends with continuation punctuation (, : - ;), OR
+#       (b) line 2 is >= 40 characters (long enough to be title text, not
+#           a short author name) AND doesn't look like an address or email
 
 # Boilerplate header words/patterns to skip before selecting the title line
 boilerplate_patterns <- c(
@@ -87,22 +91,6 @@ is_boilerplate <- function(x) {
     map_lgl(~ any(str_detect(.x, boilerplate_patterns)))
 }
 
-# Pattern to detect author or institution lines — used to avoid appending
-# these onto the title when a title wraps without continuation punctuation
-author_institution_pattern <- paste(
-  "university|department|institute|csiro|division|college|centre|center",
-  "research|school|faculty|laboratory|ltd|pty|inc|gov\\.au|email|@",
-  sep = "|"
-)
-
-is_author_or_institution <- function(x) {
-  str_detect(str_to_lower(x), author_institution_pattern) |
-    # "John Smith1," or "Colin McMaster1,"
-    str_detect(x, "^[A-Z][a-z]+\\s[A-Z][a-z]+\\d*[,\\s]") |
-    # "A.K. Abadi" or "J.F. Angus"
-    str_detect(x, "^[A-Z]\\.[A-Z A-Z\\.]*[,\\d\\s]")
-}
-
 cat("Extracting metadata (this may take a few minutes)...\n")
 
 titles      <- character(length(pdf_files))
@@ -120,7 +108,7 @@ for (i in seq_along(pdf_files)) {
     page1 <- pages[1] |>
       iconv(from = "UTF-8", to = "UTF-8", sub = "\uFFFD") |>
       # Transliterate common non-ASCII punctuation to ASCII equivalents
-      # so these characters don't corrupt the extracted title
+      # so these characters do not corrupt the extracted title
       str_replace_all("\u2019|\u2018", "'") |>   # curly apostrophes → '
       str_replace_all("\u201C|\u201D", '"') |>   # curly quotes → "
       str_replace_all("\u2013", "-") |>          # en-dash → -
@@ -135,25 +123,25 @@ for (i in seq_along(pdf_files)) {
       str_squish() |>
       keep(~ .x != "") |>
       keep(~ !is_boilerplate(.x)) |>
-      # Drop lines where >30% of characters are replacement chars
+      # Drop lines where >30% of characters are replacement chars (junk lines)
       keep(~ str_count(.x, "\uFFFD") / max(str_length(.x), 1) < 0.3)
     
     title <- if (length(lines) > 0) lines[1] else NA_character_
     
+    # Append line 2 if it looks like title text continuing, not author/address.
+    # (a) line 1 ends with continuation punctuation: title clearly wraps
+    # (b) line 2 is long (>=40 chars) and not an address/email: likely a
+    #     wrapped title rather than a short author name line
     if (!is.na(title) && length(lines) > 1) {
       
-      # (a) Continuation punctuation: title clearly continues on next line
-      if (str_detect(title, "[:\\-;]$")) {
-        title <- paste(title, lines[2])
-        if (length(lines) > 2 && str_detect(lines[2], "[:\\-;]$")) {
-          title <- paste(title, lines[3])
-        }
-        
-        # (b) No sentence-ending punctuation and next line isn't author/institution:
-        #     title has wrapped onto the next line without a continuation character
-      } else if (!str_detect(title, "[.!?]$") &&
-                 !is_author_or_institution(lines[2])) {
-        title <- paste(title, lines[2])
+      line2 <- lines[2]
+      
+      is_continuation_punct <- str_detect(title, "[,:\\-;]$")
+      is_long_enough        <- str_length(line2) >= 40
+      is_not_address        <- !str_detect(line2, "@|P\\.O\\.|PMB|GPO|Box\\s\\d|\\d{4}$")
+      
+      if (is_continuation_punct || (is_long_enough && is_not_address)) {
+        title <- paste(title, line2)
       }
     }
     
@@ -176,6 +164,18 @@ for (i in seq_along(pdf_files)) {
 cat("Metadata extraction complete\n")
 
 # ── 3. BUILD INDEX ────────────────────────────────────────────────────────────
+# Author parsing from filename:
+#   Filenames follow the convention: YYYY_Author Name_Rest of title.pdf
+#   The author is always the segment between the FIRST and SECOND underscore.
+#
+#   Examples:
+#     1980_A. Axelsen_Improved Plant Management.pdf      → A. Axelsen
+#     1980_A. D. Doyle and N. W. Forrester_Surface...   → A. D. Doyle
+#     1980_Ann Petch_Crop Sequences...                   → Ann Petch
+#
+#   Known exception: some filenames start with a title fragment rather than
+#   an author. These will need manual correction in the CSV.
+
 index <- tibble(path_original = pdf_files) |>
   mutate(
     year              = path_original |> path_dir() |> path_file() |> as.integer(),
@@ -204,6 +204,8 @@ index <- tibble(path_original = pdf_files) |>
          page_count, word_count, first_author, path_original, path_new)
 
 # ── 4. REPORT FAILED TITLE EXTRACTIONS ───────────────────────────────────────
+# Show any files where title extraction returned NA.
+# These are typically scanned PDFs with no text layer.
 failed <- index |> filter(is.na(title))
 
 if (nrow(failed) > 0) {
@@ -214,6 +216,10 @@ if (nrow(failed) > 0) {
 }
 
 # ── 5. MANUAL FIXES FROM EXCEL ────────────────────────────────────────────────
+# Reads metadata_manual fix.xlsx from the root folder.
+# Columns expected: ID, first_author_new, title_actual
+# Either fix column can be blank/NA — only the populated fields are applied.
+
 fixes_path       <- file.path(root_dir, "metadata_manual fix.xlsx")
 manual_fixes_raw <- readxl::read_excel(fixes_path)
 manual_fixes_raw <- manual_fixes_raw |>
