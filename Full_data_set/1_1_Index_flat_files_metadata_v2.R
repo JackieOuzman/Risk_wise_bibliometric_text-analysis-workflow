@@ -9,12 +9,12 @@
 #      excluding the papers_flat output folder.
 #   2. Opens each PDF and extracts:
 #        - Title:       first meaningful line(s) of page 1. Line 2 is appended
-#                       if line 1 ends with , : - ; or the words and/AND/&
+#                       if line 1 ends with : - ; or the words and/AND/&
 #                       OR if line 1 ends with a Roman numeral and line 2 is
 #                       a short single word (series subtitle pattern).
-#        - First author: the first non-numeric line after the title ends, with
-#                       everything after the first comma or " and " removed,
-#                       and superscript digits stripped.
+#        - First author: the first non-numeric/non-footnote line after the
+#                       title ends, with everything after the first comma or
+#                       " and " removed, and superscript digits stripped.
 #        - Page count:  total number of pages.
 #        - Word count:  total word count across all pages.
 #   3. Falls back to filename-parsed author if PDF author extraction fails.
@@ -59,15 +59,16 @@ cat("Found", length(pdf_files), "PDFs\n")
 #   - Transliterate common non-ASCII punctuation to ASCII equivalents
 #   - Skip boilerplate header lines (OFFICIAL, page numbers etc.)
 #   - Take first remaining line as title
-#   - Append line 2 if line 1 ends with , : - ; or and/AND/& AND line 2
-#     doesn't look like an address or email
+#   - Append line 2 if line 1 ends with : - ; or and/AND/& AND line 2
+#     doesn't look like an address or email. Comma excluded from continuation
+#     punctuation — too many author lines follow a comma-ending title fragment.
 #   - Also append line 2 if line 1 ends with a Roman numeral (series subtitle
 #     pattern e.g. "- I" / "phosphorus") and line 2 is a short single word
 #
 # Author extraction:
-#   - Skip lines that are only digits/whitespace (floating superscripts that
-#     pdf_text() extracts as separate lines above the author name)
-#   - Take the first non-numeric line after the title ends
+#   - Skip lines that are only digits/whitespace (floating superscript numbers)
+#     or only single letters/whitespace (footnote markers e.g. "a b c")
+#   - Take the first remaining line after the title ends
 #   - Strip Unicode superscript digits and inline superscripts
 #   - Strip everything after the first comma or " and " to get first author only
 #   - Fall back to filename-parsed author if result looks garbled
@@ -127,13 +128,14 @@ for (i in seq_along(pdf_files)) {
     title          <- if (length(lines) > 0) lines[1] else NA_character_
     title_end_line <- 1L
     
-    # Primary continuation: line 1 ends with , : - ; or and/AND/&
-    # and line 2 doesn't look like an address or email
+    # Primary continuation: line 1 ends with : - ; or and/AND/&
+    # Comma deliberately excluded — too many titles end with a comma fragment
+    # that is actually followed by the author line, not more title text.
     if (!is.na(title) && length(lines) > 1) {
       
       line2 <- lines[2]
       
-      is_continuation_punct <- str_detect(title, "[,:\\-;]$")
+      is_continuation_punct <- str_detect(title, "[:\\-;]$")
       is_continuation_and   <- str_detect(title, "\\band$|\\bAND$|&$")
       is_not_address        <- !str_detect(line2, "@|P\\.O\\.|PMB|GPO|Box\\s\\d|\\d{4}$")
       
@@ -159,13 +161,14 @@ for (i in seq_along(pdf_files)) {
     title <- str_squish(title)
     if (title == "") title <- NA_character_
     
-    # Author: first non-numeric line after the title ends.
-    # pdf_text() sometimes extracts floating superscript numbers as separate
-    # lines sitting between the title and the author name — skip these.
+    # Author: first non-numeric/non-footnote line after the title ends.
+    # Skip lines that are only digits/whitespace (floating superscript numbers
+    # extracted as separate lines by pdf_text) or only single letters/whitespace
+    # (footnote affiliation markers e.g. "a b c" from ᵃ ᵇ ᶜ)
     author_line_idx <- title_end_line + 1L
     
     while (author_line_idx <= length(lines) &&
-           str_detect(lines[author_line_idx], "^[\\d\\s]+$")) {
+           str_detect(lines[author_line_idx], "^[\\d\\s]+$|^([a-d]\\s*)+$")) {
       author_line_idx <- author_line_idx + 1L
     }
     
@@ -301,10 +304,7 @@ index |>
 
 cat("✓ Index saved to:", index_out, "\n")
 
+failed |>
+  select(id, filename_original, path_original) |>
+  write_csv(file.path(root_dir, "failed_title_extractions.csv"))
 
-# For a yellow case - e.g. 1980_0060
-list.files("N:/work/RiskWise/Brendan_Ag_Conf_papers/Full_data_set/1980/") |>
-  grep("J.D", x = _, value = TRUE)
-pdf_text("N:/work/RiskWise/Brendan_Ag_Conf_papers/Full_data_set/1980/FILENAME.pdf")[1] |>
-  iconv(from = "UTF-8", to = "UTF-8", sub = "\uFFFD") |>
-  strsplit("\n") |> unlist() |> trimws() |> (\(x) head(x[x != ""], 8))()
