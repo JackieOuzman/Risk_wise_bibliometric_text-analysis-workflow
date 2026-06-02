@@ -12,9 +12,9 @@
 #                       if line 1 ends with , : - ; or the words and/AND/&
 #                       OR if line 1 ends with a Roman numeral and line 2 is
 #                       a short single word (series subtitle pattern).
-#        - First author: the first line after the title ends, with everything
-#                       after the first comma or " and " removed, and trailing
-#                       superscript digits stripped.
+#        - First author: the first non-numeric line after the title ends, with
+#                       everything after the first comma or " and " removed,
+#                       and superscript digits stripped.
 #        - Page count:  total number of pages.
 #        - Word count:  total word count across all pages.
 #   3. Falls back to filename-parsed author if PDF author extraction fails.
@@ -65,7 +65,9 @@ cat("Found", length(pdf_files), "PDFs\n")
 #     pattern e.g. "- I" / "phosphorus") and line 2 is a short single word
 #
 # Author extraction:
-#   - Take the first line after the title ends
+#   - Skip lines that are only digits/whitespace (floating superscripts that
+#     pdf_text() extracts as separate lines above the author name)
+#   - Take the first non-numeric line after the title ends
 #   - Strip Unicode superscript digits and inline superscripts
 #   - Strip everything after the first comma or " and " to get first author only
 #   - Fall back to filename-parsed author if result looks garbled
@@ -157,9 +159,17 @@ for (i in seq_along(pdf_files)) {
     title <- str_squish(title)
     if (title == "") title <- NA_character_
     
-    # Author: first line after the title ends
+    # Author: first non-numeric line after the title ends.
+    # pdf_text() sometimes extracts floating superscript numbers as separate
+    # lines sitting between the title and the author name — skip these.
     author_line_idx <- title_end_line + 1L
-    author <- if (length(lines) >= author_line_idx) {
+    
+    while (author_line_idx <= length(lines) &&
+           str_detect(lines[author_line_idx], "^[\\d\\s]+$")) {
+      author_line_idx <- author_line_idx + 1L
+    }
+    
+    author <- if (author_line_idx <= length(lines)) {
       lines[author_line_idx] |>
         # Strip Unicode superscript digits (¹²³ etc.) anywhere in string
         str_remove_all("[\u00B9\u00B2\u00B3\u2070-\u2079\u207F]") |>
@@ -208,6 +218,7 @@ for (i in seq_along(pdf_files)) {
 }
 
 cat("Metadata extraction complete\n")
+
 # ── 3. BUILD INDEX ────────────────────────────────────────────────────────────
 # Author parsing from filename used as fallback only:
 #   Filenames follow the convention: YYYY_Author Name_Rest of title.pdf
@@ -291,6 +302,9 @@ index |>
 cat("✓ Index saved to:", index_out, "\n")
 
 
-pdf_text("N:/work/RiskWise/Brendan_Ag_Conf_papers/Full_data_set/1980/1980_D.F. Cameron_Genetic Exploitation of the Environment.pdf")[1] |>
+# For a yellow case - e.g. 1980_0060
+list.files("N:/work/RiskWise/Brendan_Ag_Conf_papers/Full_data_set/1980/") |>
+  grep("J.D", x = _, value = TRUE)
+pdf_text("N:/work/RiskWise/Brendan_Ag_Conf_papers/Full_data_set/1980/FILENAME.pdf")[1] |>
   iconv(from = "UTF-8", to = "UTF-8", sub = "\uFFFD") |>
-  strsplit("\n") |> unlist() |> trimws() |> (\(x) head(x[x != ""], 6))()
+  strsplit("\n") |> unlist() |> trimws() |> (\(x) head(x[x != ""], 8))()
