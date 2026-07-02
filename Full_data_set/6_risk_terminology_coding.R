@@ -24,8 +24,11 @@
 #           risk_terms_trend.png    (output_dir) — trend line plot
 # Packages: tidyverse
 # ══════════════════════════════════════════════════════════════════════════════
-
+#install.packages("patchwork")
+#install.packages("ggh4x")
+library(ggh4x)   
 library(tidyverse)
+library(patchwork)  
 
 # ── CONFIGURATION ─────────────────────────────────────────────────────────────
 root_dir     <- "N:/work/RiskWise/Brendan_Ag_Conf_papers/Full_data_set/"
@@ -138,9 +141,129 @@ by_year <- all_codes |>
 write_csv(by_year, year_out)
 cat("✓ Year-aggregated prevalence saved to:", year_out, "\n")
 
+# ── 6c. FIRST/LAST YEAR LABELS FOR EACH CATEGORY ──────────────────────────────
+# Anchor each line with a concrete "n_papers_with_term / n_papers_total" label
+# at its first and last year, so readers can see the actual counts behind the
+# percentage, not just the trend shape.
+
+endpoint_labels <- by_year |>
+  group_by(category) |>
+  mutate(cat_range = max(pct_papers) - min(pct_papers)) |>
+  filter(year == min(year) | year == max(year)) |>
+  ungroup() |>
+  mutate(
+    label = paste0(n_papers_with_term, "/", n_papers_total),
+    # nudge first year's label UP, last year's label DOWN, by ~18% of
+    # that panel's own y-range — keeps consistent visual spacing everywhere
+    label_y = if_else(
+      year == min(year),
+      pct_papers + 0.18 * cat_range,
+      pct_papers - 0.18 * cat_range
+    )
+  )
 
 
+##*****###
+# ── 6d. ASSIGN CATEGORIES TO SHARED Y-AXIS TIERS ──────────────────────────────
+tier_map <- tibble::tribble(
+  ~category,                  ~tier,
+  "Term: Variability",        "high",
+  "CI / p-values",            "high",
+  "Term: Risk",                "high",
+  "Method: Sensitivity",      "mid",
+  "Method: Scenario-based",   "mid",
+  "Term: Uncertainty",        "mid",
+  "Method: Probabilistic",    "low",
+  "Term: Vulnerability",      "low",
+  "Behavioural terminology",  "low"
+)
 
+# Fixed label y-positions per tier (first year, last year)
+tier_label_y <- tibble::tribble(
+  ~tier, ~y_first, ~y_last,
+  "high", 50,        10,
+  "mid",  22,         4,
+  "low",  15,        15
+)
+
+# Order categories so tiers group together, high to low, for a clean grid
+category_tier_order <- tier_map |>
+  mutate(tier = factor(tier, levels = c("high", "mid", "low"))) |>
+  arrange(tier, category) |>
+  pull(category)
+
+by_year <- by_year |>
+  select(-any_of("tier")) |>
+  left_join(tier_map, by = "category") |>
+  mutate(category = factor(category, levels = category_tier_order))
+
+endpoint_labels <- endpoint_labels |>
+  select(-any_of(c("tier", "y_first", "y_last", "label_y_fixed"))) |>
+  left_join(tier_map, by = "category") |>
+  left_join(tier_label_y, by = "tier") |>
+  group_by(category) |>
+  mutate(label_y_fixed = if_else(year == min(year), y_first, y_last)) |>
+  ungroup() |>
+  mutate(category = factor(category, levels = category_tier_order))
+
+# ── 6e. PER-TIER Y-AXIS SCALES, ORDERED TO MATCH category_tier_order ─────────
+tier_scales <- list(
+  "high" = scale_y_continuous(limits = c(0, 60), breaks = seq(0, 60, 20),
+                              labels = scales::label_percent(scale = 1)),
+  "mid"  = scale_y_continuous(limits = c(0, 30), breaks = seq(0, 30, 10),
+                              labels = scales::label_percent(scale = 1)),
+  "low"  = scale_y_continuous(limits = c(0, 20), breaks = seq(0, 20, 10),
+                              labels = scales::label_percent(scale = 1))
+)
+
+ordered_tiers <- tier_map |>
+  mutate(category = factor(category, levels = category_tier_order)) |>
+  arrange(category) |>
+  pull(tier)
+
+# ── 6f. SINGLE FACETED PLOT, TIERED Y-AXES ────────────────────────────────────
+p <- ggplot(by_year, aes(x = year, y = pct_papers)) +
+  geom_line(colour = "#2E75B6", linewidth = 1.5) +
+  geom_point(colour = "#2E75B6", size = 1.3) +
+  geom_text(
+    data = endpoint_labels,
+    aes(x = year, y = label_y_fixed, label = label),
+    angle = 90, hjust = 0.5, vjust = 0.5,
+    size = 3.2, colour = "grey30"
+  ) +
+  scale_x_continuous(breaks = seq(1980, 2024, 12),
+                     expand = expansion(mult = c(0.08, 0.08))) +
+  facet_wrap(~ category, ncol = 3, scales = "free_y") +
+  facetted_pos_scales(y = tier_scales[ordered_tiers]) +
+  
+  labs(
+    title    = "Risk-related terminology in Agronomy Australia papers, 1980\u20132024",
+    subtitle = "% of papers per year mentioning each term or method category, grouped by shared y-axis scale. \nLabels show first and last year's count as papers with term / total papers that year.",
+    x = NULL, 
+    y = NULL,
+    #y = "% of papers that year",
+    caption = "Dictionary-based coding (first draft) \u2014 presence of a stem/pattern is a proxy for the concept,\nnot a guarantee the paper substantively addresses it. Review dictionaries before drawing conclusions."
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    strip.text    = element_text(size = 10, face = "bold"),
+    axis.text.y   = element_text(size = 9),     # <- controls the % numbers on y-axis
+    axis.text.x   = element_text(size = 9),     # <- controls the year numbers on x-axis (currently also inherited from base_size)
+    panel.spacing = unit(1.2, "lines"),
+    plot.title    = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 9, colour = "grey40"),
+    plot.caption  = element_text(size = 8, colour = "grey40", hjust = 0)
+  )
+
+p
+
+ggsave(plot_out, p, width = 10, height = 8, dpi = 150)
+cat("✓ Plot saved to:", plot_out, "\n")
+##*****###
+
+ggsave(plot_out, p_combined, width = 11, height = 10, dpi = 150)
+cat("✓ Tiered plot saved to:", plot_out, "\n")
+##*****###
 # ── 7. PLOT — FACETED TREND LINES BY CATEGORY ─────────────────────────────────
 # Each category gets its own panel — much easier to read individual trends
 # than one shared spaghetti plot. Free y-axis per panel since categories like
@@ -166,12 +289,20 @@ by_year <- by_year |>
 p <- ggplot(by_year, aes(x = year, y = pct_papers)) +
   geom_line(colour = "#2E75B6", linewidth = 1.5) +
   geom_point(colour = "#2E75B6", size = 1.3) +
-  scale_x_continuous(breaks = seq(1980, 2024, 8)) +
-  scale_y_continuous(labels = scales::label_percent(scale = 1)) +
+  geom_text(
+    data = endpoint_labels,
+    aes(x = year, y = label_y, label = label),
+    angle = 90, hjust = 0.5, vjust = 0.5,
+    size = 2.4, colour = "grey30"
+  ) +
+  scale_x_continuous(breaks = seq(1980, 2024, 8),
+                     expand = expansion(mult = c(0.08, 0.08))) +
+  scale_y_continuous(labels = scales::label_percent(scale = 1),
+                     expand = expansion(mult = c(0.15, 0.15))) +
   facet_wrap(~ category, scales = "free_y", ncol = 3) +
   labs(
     title    = "Risk-related terminology in Agronomy Australia papers, 1980\u20132024",
-    subtitle = "% of papers per year mentioning each term or method category (note: y-axis scales differ by panel)",
+    subtitle = "% of papers per year mentioning each term or method category (note: y-axis scales differ by panel). Labels show first and last year's count as papers with term / total papers that year.",
     x = NULL,
     y = "% of papers that year",
     caption = "Dictionary-based coding (first draft) \u2014 presence of a stem/pattern is a proxy for the concept,\nnot a guarantee the paper substantively addresses it. Review dictionaries before drawing conclusions."
@@ -181,10 +312,9 @@ p <- ggplot(by_year, aes(x = year, y = pct_papers)) +
     strip.text      = element_text(size = 9, face = "bold"),
     panel.spacing   = unit(1.2, "lines"),
     plot.title      = element_text(face = "bold", size = 12),
-    plot.subtitle   = element_text(size = 9, colour = "grey40"),
+    plot.subtitle   = element_text(size = 8, colour = "grey40"),
     plot.caption    = element_text(size = 7, colour = "grey40", hjust = 0)
   )
-
 p
 
 ggsave(plot_out, p, width = 10, height = 7, dpi = 150)
@@ -215,3 +345,64 @@ write_csv(trend_test, file.path(output_dir, "risk_terms_trend_test.csv"))
 print(trend_test, n = Inf)
 cat("✓ Trend test results saved to:", file.path(output_dir, "risk_terms_trend_test.csv"), "\n")
 
+
+################################################################################
+
+# ── DIAGNOSTIC — what words are actually being counted as "Term: Risk"? ──────
+risk_word_audit <- tokens |>
+  filter(str_detect(word, "^(risk)")) |>
+  count(word, sort = TRUE)
+
+print(risk_word_audit, n = Inf)
+
+
+# ── CROSS-CHECK — does the raw-text word-boundary count roughly agree? RISK───────
+risk_raw_check <- corpus |>
+  mutate(has_risk_raw = str_detect(text, regex("\\brisk", ignore_case = TRUE))) |>
+  count(year, has_risk_raw) |>
+  group_by(year) |>
+  mutate(pct = round(100 * n / sum(n), 1)) |>
+  filter(has_risk_raw) |>
+  select(year, pct)
+
+print(risk_raw_check, n = Inf)
+
+
+# ── DIAGNOSTIC — what changed around 1989-1992? RISK───────────────────────────────
+# Check: did conference scope/theme change, did paper volume change,
+# or did the SAME kind of papers just start using the word "risk" more?
+
+# 1. Conference themes around the jump
+themes_in <- "N:/work/RiskWise/Brendan_Ag_Conf_papers/Full_data_set/conference_themes.csv"
+conference_themes <- read_csv(themes_in, show_col_types = FALSE)
+
+conference_themes |> filter(year %in% c(1987, 1989, 1992, 1993))
+
+# 2. Papers per year — did the conference get bigger/smaller/different?
+corpus |> filter(year %in% c(1987, 1989, 1992, 1993)) |> count(year)
+
+# 3. Which 1992 papers actually contain "risk" — what are they about?
+corpus |>
+  filter(year == 1992, str_detect(text, regex("\\brisk", ignore_case = TRUE))) |>
+  select(id, title, first_author) |>
+  print(n = 20)
+
+# ── DIAGNOSTIC — is the mid-2000s dip real or a sample-size artefact? RISK ────────
+
+# 1. Paper counts across the dip years — is the denominator shrinking?
+corpus |> filter(year %in% c(2001, 2003, 2004, 2006)) |> count(year, name = "n_papers")
+
+# 2. Raw risk percentage across the same years (from your earlier cross-check)
+risk_raw_check |> filter(year %in% c(2001, 2003, 2004, 2006))
+
+# 3. Is the dip specific to "risk", or shared across ALL categories that year?
+# (a shared dip points to a corpus-wide effect; risk-only points to something
+# specific about that topic)
+by_year |>
+  filter(year %in% c(2001, 2003, 2004, 2006)) |>
+  select(year, category, pct_papers) |>
+  arrange(category, year) |>
+  print(n = Inf)
+
+# 4. Conference themes for context
+conference_themes |> filter(year %in% c(2001, 2003, 2004, 2006))
